@@ -1,0 +1,107 @@
+!pip install tensorflow opencv-python
+
+import tensorflow as tf
+from tensorflow.keras import layers, models
+import numpy as np
+import cv2
+import pandas as pd
+import os
+from sklearn.model_selection import train_test_split
+from google.colab import drive
+from google.colab import files
+
+# ============================
+# 1) Mount Google Drive
+# ============================
+drive.mount('/content/drive')
+
+# ============================
+# 2) Load Dataset
+# ============================
+metadata = pd.read_csv("/content/drive/MyDrive/archive/HAM10000_metadata.csv")
+
+def find_image_path(image_id):
+    p1 = f"/content/drive/MyDrive/archive/HAM10000_images_part_1/{image_id}.jpg"
+    p2 = f"/content/drive/MyDrive/archive/HAM10000_images_part_2/{image_id}.jpg"
+    if os.path.exists(p1):
+        return p1
+    elif os.path.exists(p2):
+        return p2
+    return None
+
+metadata['image_path'] = metadata['image_id'].apply(find_image_path)
+metadata = metadata.dropna(subset=['image_path'])
+
+class_names = ['akiec','bcc','bkl','df','nv','vasc','mel']
+metadata['label'] = metadata['dx'].apply(lambda x: class_names.index(x))
+
+train_df, val_df = train_test_split(metadata, test_size=0.2, stratify=metadata['label'], random_state=42)
+
+# ============================
+# 3) Preprocess Settings
+# ============================
+IMG_SIZE = 64  # small to avoid memory issues
+
+# ============================
+# 4) Data Generator (Batch)
+# ============================
+class DataGenerator(tf.keras.utils.Sequence):
+    def __init__(self, df, batch_size=16, shuffle=True):
+        self.df = df.reset_index(drop=True)
+        self.batch_size = batch_size
+        self.shuffle = shuffle
+        self.indexes = np.arange(len(self.df))
+        self.on_epoch_end()
+
+    def __len__(self):
+        return int(np.ceil(len(self.df) / self.batch_size))
+
+    def __getitem__(self, index):
+        batch_indexes = self.indexes[index*self.batch_size:(index+1)*self.batch_size]
+        batch_df = self.df.iloc[batch_indexes]
+
+        images, labels = [], []
+        for _, row in batch_df.iterrows():
+            img = cv2.imread(row['image_path'])
+            img = cv2.cvtColor(img, cv2.COLOR_BGR2RGB)
+            img = cv2.resize(img, (IMG_SIZE, IMG_SIZE))
+            img = img / 255.0
+            images.append(img)
+            labels.append(row['label'])
+
+        return np.array(images), np.array(labels)
+
+    def on_epoch_end(self):
+        if self.shuffle:
+            np.random.shuffle(self.indexes)
+
+train_gen = DataGenerator(train_df, batch_size=16)
+val_gen = DataGenerator(val_df, batch_size=16)
+
+# ============================
+# 5) Build CNN Classifier
+# ============================
+classifier = models.Sequential([
+    layers.Input(shape=(IMG_SIZE, IMG_SIZE, 3)),
+    layers.Conv2D(32, 3, activation='relu'),
+    layers.MaxPooling2D(),
+    layers.Conv2D(64, 3, activation='relu'),
+    layers.MaxPooling2D(),
+    layers.Conv2D(128, 3, activation='relu'),
+    layers.GlobalAveragePooling2D(),
+    layers.Dense(256, activation='relu'),
+    layers.Dense(len(class_names), activation='softmax')
+])
+
+classifier.compile(optimizer='adam', loss='sparse_categorical_crossentropy', metrics=['accuracy'])
+
+# ============================
+# 6) Train Classifier
+# ============================
+classifier.fit(train_gen, validation_data=val_gen, epochs=10)
+
+# ============================
+# 7) Save Model
+# ============================
+classifier.save("/content/classifier.keras")
+files.download('/content/classifier.keras')
